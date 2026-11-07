@@ -61,7 +61,8 @@ class AuthenticationTests(TestCase):
         self.client.post("/api/v1/auth/logout")
         wrong = self.client.post("/api/v1/auth/login", {"email": "ada@example.com", "password": "wrong"}, format="json")
         unknown = self.client.post("/api/v1/auth/login", {"email": "nobody@example.com", "password": "wrong"}, format="json")
-        self.assertEqual(wrong.status_code, unknown.status_code, 401)
+        self.assertEqual(wrong.status_code, 401)
+        self.assertEqual(unknown.status_code, 401)
         self.assertEqual(wrong.data["error"]["code"], unknown.data["error"]["code"])
         self.assertEqual(wrong.data["error"]["message"], unknown.data["error"]["message"])
 
