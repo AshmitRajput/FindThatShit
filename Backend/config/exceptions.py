@@ -8,6 +8,11 @@ from rest_framework.views import exception_handler
 
 logger = logging.getLogger(__name__)
 
+
+class APIError(exceptions.APIException):
+    error_code = "ERROR"
+
+
 ERROR_CODES = {
     exceptions.ValidationError: "VALIDATION_ERROR",
     exceptions.ParseError: "VALIDATION_ERROR",
@@ -44,7 +49,9 @@ def api_exception_handler(exc, context):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
-    code = next((c for cls, c in ERROR_CODES.items() if isinstance(exc, cls)), "ERROR")
+    code = getattr(exc, "error_code", None) or next(
+        (c for cls, c in ERROR_CODES.items() if isinstance(exc, cls)), "ERROR"
+    )
     if isinstance(exc, exceptions.ValidationError):
         message = "Invalid input."
         details = {"field_errors": response.data} if isinstance(response.data, dict) else {"errors": response.data}

@@ -25,6 +25,16 @@ APP_ENV = os.getenv("APP_ENV", "local").strip().lower()
 if APP_ENV not in {"local", "test", "staging", "production"}:
     raise ImproperlyConfigured("APP_ENV must be local, test, staging, or production.")
 IS_DEPLOYED = APP_ENV in {"staging", "production"}
+AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME", "")
+AWS_REGION = os.getenv("AWS_REGION", "")
+AWS_S3_KEY_PREFIX = os.getenv("AWS_S3_KEY_PREFIX", "findthatshit").strip("/")
+AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL", "")
+S3_PRESIGN_UPLOAD_TTL_SECONDS = int(os.getenv("S3_PRESIGN_UPLOAD_TTL_SECONDS", "900"))
+S3_PRESIGN_DOWNLOAD_TTL_SECONDS = int(os.getenv("S3_PRESIGN_DOWNLOAD_TTL_SECONDS", "600"))
+MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))
+if IS_DEPLOYED and not AWS_S3_BUCKET_NAME:
+    raise ImproperlyConfigured("AWS_S3_BUCKET_NAME is required in deployed environments.")
+
 DEBUG = env_bool("DEBUG", False)
 if IS_DEPLOYED and DEBUG:
     raise ImproperlyConfigured("DEBUG must be false in deployed environments.")
@@ -137,9 +147,16 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
+    "DEFAULT_PAGINATION_CLASS": "config.pagination.StandardPagination",
     "EXCEPTION_HANDLER": "config.exceptions.api_exception_handler",
-    "DEFAULT_THROTTLE_RATES": {"auth": os.getenv("AUTH_THROTTLE_RATE", "10/min"), "default": "10/min"},
+    "DEFAULT_THROTTLE_RATES": {
+        "auth": os.getenv("AUTH_THROTTLE_RATE", "10/min"),
+        "upload": os.getenv("UPLOAD_THROTTLE_RATE", "30/min"),
+    },
 }
+
+if APP_ENV == "test":
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 LOGGING = {
     "version": 1,

@@ -63,6 +63,10 @@ This README is the **primary context file for AI coding agents** (and humans) wo
 | D14 | All enum values are `UPPER_SNAKE_CASE` in DB and API. | PROPOSED |
 | D15 | Auth transport: Django session cookie with DRF `SessionAuthentication`; unsafe browser requests use the CSRF cookie value in `X-CSRFToken`. | DECIDED |
 | D16 | Embedding vector dimension depends on chosen embedding model; set via `EMBEDDING_DIMENSIONS` config and fixed in the migration. | OPEN |
+| D17 | Phase 2 uploads use one private S3 file per resource, with MIME-derived keys and presigned PUT/GET URLs. | DECIDED |
+| D18 | Search route is `GET /api/v1/resources/search` (Phase 4). Resource routes use `<uuid:pk>`, so `search` is never read as an id. | DECIDED |
+| D19 | Processing routes are `POST /api/v1/resources/{id}/process` and `GET /api/v1/resources/{id}/processing` (Phase 3). | DECIDED |
+| D20 | Idempotency keys (`Idempotency-Key` header, `idempotency_keys` table) are built in Phase 3 together with `ProcessingJob`. | DECIDED |
 
 ---
 
@@ -115,6 +119,16 @@ All future ingestion paths must **normalize into the same** `Resource / SourceCo
 10. User can search saved resources by metadata and content.
 11. User can open the original source and the saved resource.
 12. Architecture supports future semantic and voice retrieval without major redesign.
+
+### 3.5 Phase plan and status
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Foundation + accounts: Django/DRF, PostgreSQL, Redis, Celery, health, session auth, error envelope | Done |
+| 2 | Resource core + storage: models, CRUD, tags, pagination, S3 presigned upload/download | Code done; live S3 check and full test suite pending sign-off |
+| 3 | Async processing + AI: `ProcessingJob`, extractors (PDF/DOCX/TXT), AI provider, idempotency, `/process`, `/processing` | Planned |
+| 4 | Search + frontend: `GET /resources/search`, React screens | Planned |
+| 5 | Integration, hardening, security/processing/upload/search test passes | Planned |
 
 ---
 
@@ -267,7 +281,7 @@ sequenceDiagram
     W->>W: LLM analysis -> JSON, validate
     W->>W: embeddings
     W->>DB: persist content, metadata, tags, embedding; status PROCESSED
-    Web->>API: GET /resources/{id}/status (poll)
+    Web->>API: GET /resources/{id}/processing (poll)
     API-->>Web: PROCESSED
 ```
 
@@ -391,7 +405,7 @@ sequenceDiagram
 ```mermaid
 erDiagram
     USERS ||--o{ RESOURCES : owns
-    USERS ||--o{ TAGS : "owns (nullable = global)"
+    USERS ||--o{ TAGS : owns
     USERS ||--o{ AUDIT_EVENTS : triggers
     USERS ||--o{ IDEMPOTENCY_KEYS : sends
     RESOURCES ||--o| SOURCE_CONTENTS : "has one"
@@ -447,14 +461,15 @@ erDiagram
     }
     TAGS {
         uuid id PK
-        uuid user_id FK_nullable
+        uuid user_id FK
         string name
         string normalized_name
         datetime created_at
     }
     RESOURCE_TAGS {
-        uuid resource_id PK_FK
-        uuid tag_id PK_FK
+        bigint id PK
+        uuid resource_id FK
+        uuid tag_id FK
         datetime created_at
     }
     EMBEDDINGS {
@@ -529,13 +544,13 @@ Conventions: UUID primary keys, UTC timestamps, explicit max lengths, `NOT NULL`
 | `id` | UUID | PK |
 | `user_id` | UUID | FK users, NOT NULL |
 | `title` | varchar(255) | User-entered or AI-generated; may be empty until processed |
-| `creator` | varchar(255) | Nullable |
+| `creator` | varchar(255) | Empty string when not provided |
 | `platform` | varchar(20) | `INSTAGRAM`, `X`, `OTHER`; derived from `source_content.source_type` * |
 | `source_url` | varchar(2048) | NOT NULL; validated URL |
-| `resource_url` | varchar(2048) | Nullable (null when a file is uploaded) |
+| `resource_url` | varchar(2048) | Empty when a file is uploaded |
 | `resource_type` | varchar(30) | See enum below |
 | `description` | text | AI-generated resource description |
-| `keywords` * | text[] | AI-generated keywords |
+| `keywords` * | jsonb | AI-generated keyword list |
 | `processing_status` | varchar(20) | `UPLOADED`, `PROCESSING`, `PROCESSED`, `FAILED`; default `UPLOADED` |
 | `version` | integer | NOT NULL, default 1; optimistic locking |
 | `last_processed_at` * | timestamptz | Nullable; shown in detail view |
@@ -552,8 +567,8 @@ Check: at least one of `resource_url` or an attached `files` row must exist befo
 | `id` | UUID | PK |
 | `resource_id` | UUID | FK resources, UNIQUE (one per resource), ON DELETE CASCADE |
 | `source_type` | varchar(20) | `INSTAGRAM_REEL`, `INSTAGRAM_POST`, `X_POST`, `OTHER` |
-| `transcript` | text | Reel audio transcript; nullable |
-| `post_text` | text | Extracted written post content; nullable |
+| `transcript` | text | Reel audio transcript; empty until available |
+| `post_text` | text | Extracted written post content; empty until available |
 | `source_description` * | text | AI description of the Reel/Post and how it relates to the resource |
 | `extracted_metadata` | jsonb | Anything extracted from source (e.g. creator handle) |
 | `created_at`, `updated_at` | timestamptz | NOT NULL |
@@ -568,7 +583,7 @@ Check: at least one of `resource_url` or an attached `files` row must exist befo
 | `filename` | varchar(255) | Original filename (sanitized) |
 | `mime_type` | varchar(127) | Validated against allow-list |
 | `file_size` | bigint | Bytes; validated against max |
-| `checksum` | varchar(64) | Nullable until verified |
+| `checksum` | varchar(64) | Empty until verified |
 | `created_at` | timestamptz | NOT NULL |
 
 ### 8.5 `tags` and `resource_tags` [DECIDED]
@@ -578,24 +593,25 @@ Check: at least one of `resource_url` or an attached `files` row must exist befo
 | Field | Type | Constraints |
 |---|---|---|
 | `id` | UUID | PK |
-| `user_id` | UUID | FK users, **nullable** (null = available to all users) |
+| `user_id` | UUID | FK users, NOT NULL; tags are private per user |
 | `name` | varchar(50) | Display form |
 | `normalized_name` | varchar(50) | Lowercased, trimmed |
 | `created_at` | timestamptz | NOT NULL |
 
 Constraint: UNIQUE `(user_id, normalized_name)`.
 
-> Gotcha: in PostgreSQL, UNIQUE treats NULLs as distinct, so global tags (`user_id IS NULL`) need a partial unique index on `normalized_name WHERE user_id IS NULL`.
+> Only relevant if global tags are ever added (not planned): PostgreSQL UNIQUE treats NULLs as distinct, so tags with `user_id IS NULL` would need a partial unique index on `normalized_name`.
 
 `resource_tags`:
 
 | Field | Type | Constraints |
 |---|---|---|
-| `resource_id` | UUID | FK resources, part of PK |
-| `tag_id` | UUID | FK tags, part of PK |
+| `id` | bigint | PK (auto) |
+| `resource_id` | UUID | FK resources, ON DELETE CASCADE |
+| `tag_id` | UUID | FK tags, ON DELETE CASCADE |
 | `created_at` | timestamptz | NOT NULL |
 
-PK `(resource_id, tag_id)`.
+Constraint: UNIQUE `(resource_id, tag_id)` named `resource_tags_resource_id_tag_id_uq`.
 
 ### 8.6 `embeddings` [DECIDED]
 
@@ -680,7 +696,7 @@ Constraint: UNIQUE `(user_id, key, endpoint)`. A duplicate request returns the o
 | Multi-row consistency | `transaction.atomic()` for create, tag changes, job state transitions |
 | Two workers claiming one job | Short transaction with `SELECT ... FOR UPDATE SKIP LOCKED`, mark `RUNNING`, commit, then do external work outside the transaction |
 | Duplicate submissions | `Idempotency-Key` header persisted; unique constraints |
-| Duplicates | UNIQUE on tags `(user_id, normalized_name)`, `resource_tags` PK, `files.s3_object_key`, `processing_jobs.idempotency_key` |
+| Duplicates | UNIQUE on tags `(user_id, normalized_name)`, `resource_tags` `(resource_id, tag_id)`, `files.s3_object_key`, `processing_jobs.idempotency_key` |
 | Stale queue payloads | Payloads contain **IDs only**; worker reloads latest committed state |
 | Enqueue timing | Enqueue **after** commit (`transaction.on_commit`) |
 | Caching | Never use a shared mutable in-memory cache as source of truth |
@@ -698,7 +714,7 @@ Delete flow: authorize owner → transactionally delete (or mark) resource metad
 - Transport: HTTPS only. Format: JSON. Field names: `snake_case`.
 - Path segments: lowercase, plural nouns for collections; multiword actions use kebab-case (`upload-url`, `download-url`).
 - Every private endpoint requires authentication; every resource operation is scoped by `request.user`.
-- Request tracing: every response carries `X-Request-ID`. Clients may send `Idempotency-Key` on `POST /resources` and `POST /resources/{id}/process`.
+- Request tracing: every response carries `X-Request-ID`. From Phase 3, clients may send `Idempotency-Key` on `POST /resources` and `POST /resources/{id}/process`.
 - File bytes **never** pass through the API; they go directly to S3 via presigned URLs.
 - Pagination on all list/search endpoints: query `page` (default 1) and `limit` (default 20, max 50; stated range 20 to 50). [PROPOSED exact numbers]
 - Resource representation always includes `id`, `processing_status`, timestamps, and `version`.
@@ -732,7 +748,16 @@ Status codes:
 }
 ```
 
-Error `code` values are `UPPER_SNAKE_CASE` (e.g. `VALIDATION_ERROR`, `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `VERSION_CONFLICT`, `IDEMPOTENCY_CONFLICT`, `RATE_LIMITED`, `UNSUPPORTED_FILE_TYPE`, `FILE_TOO_LARGE`, `STORAGE_ERROR`, `INTERNAL_ERROR`).
+Error `code` values are `UPPER_SNAKE_CASE` (e.g. `VALIDATION_ERROR`, `UNAUTHENTICATED`, `FORBIDDEN`, `NOT_FOUND`, `VERSION_CONFLICT`, `IDEMPOTENCY_CONFLICT`, `RATE_LIMITED`, `UNSUPPORTED_FILE_TYPE`, `FILE_TOO_LARGE`, `FILE_NOT_FOUND`, `FILE_NOT_UPLOADED`, `STORAGE_ERROR`, `INTERNAL_ERROR`, `INVALID_CREDENTIALS`, `METHOD_NOT_ALLOWED`, `UNSUPPORTED_MEDIA_TYPE`).
+
+| Phase 2 error | HTTP | Meaning |
+|---|---|---|
+| `VERSION_CONFLICT` | 409 | stale `version` on PATCH |
+| `UNSUPPORTED_FILE_TYPE` | 400 | MIME type is not PDF, DOCX or TXT |
+| `FILE_TOO_LARGE` | 400 | `size` is above `MAX_UPLOAD_SIZE_BYTES` |
+| `FILE_NOT_FOUND` | 404 | resource has no file row |
+| `FILE_NOT_UPLOADED` | 409 | file row exists but the object is not in S3 yet |
+| `STORAGE_ERROR` | 502 | S3 unreachable, bad credentials or bucket; details are logged, never returned |
 
 ### 10.3 Endpoint list [DECIDED]
 
@@ -742,21 +767,25 @@ Error `code` values are `UPPER_SNAKE_CASE` (e.g. `VALIDATION_ERROR`, `UNAUTHENTI
 | POST | `/api/v1/auth/login` | Create session/token | Public | 200 |
 | POST | `/api/v1/auth/logout` | Revoke session | User | 204 |
 | GET | `/api/v1/auth/me` | Current user | User | 200 |
+| POST | `/api/v1/resources/{id}/upload-url` | Create S3 upload URL | Owner | 200 |
+| GET | `/api/v1/resources/{id}/download-url` | Create S3 download URL | Owner | 200 |
 | GET | `/api/v1/resources` | List/filter resources | User | 200 |
 | POST | `/api/v1/resources` | Create resource entry | User | 201 |
 | GET | `/api/v1/resources/{id}` | Resource detail | Owner | 200 |
 | PATCH | `/api/v1/resources/{id}` | Update metadata (requires `version`) | Owner | 200 |
 | DELETE | `/api/v1/resources/{id}` | Delete resource | Owner | 204 |
-| POST | `/api/v1/resources/{id}/upload-url` | Create S3 presigned upload URL | Owner | 200 |
-| POST | `/api/v1/resources/{id}/process` | Queue/requeue processing | Owner | 202 |
-| GET | `/api/v1/resources/{id}/status` | Processing status | Owner | 200 |
-| GET | `/api/v1/search` | Keyword / semantic / hybrid search | User | 200 |
-| GET | `/api/v1/tags` | List user/available tags | User | 200 |
-| POST | `/api/v1/resources/{id}/tags` | Attach tag | Owner | 201 |
-| DELETE | `/api/v1/resources/{id}/tags/{tag_id}` | Remove tag | Owner | 204 |
-| GET | `/api/v1/resources/{id}/download-url` | Secure file URL | Owner | 200 |
 
-Future (not MVP) [FUTURE]: a voice endpoint must reuse the query service behind `/search`; do not add a parallel search implementation.
+**Planned [DECIDED route names]**
+
+| Method | Endpoint | Purpose | Auth | Success | Phase |
+|---|---|---|---|---|---|
+| POST | `/api/v1/resources/{id}/process` | Queue/requeue processing (`Idempotency-Key`) | Owner | 202 | 3 |
+| GET | `/api/v1/resources/{id}/processing` | Processing status | Owner | 200 | 3 |
+| GET | `/api/v1/resources/search` | Keyword search (semantic/hybrid later) | User | 200 | 4 |
+
+Standalone tag endpoints (`/tags`) are not planned for the MVP: tags are sent as a list on create and PATCH.
+
+Future (not MVP) [FUTURE]: a voice endpoint must reuse the query service behind `/resources/search`; do not add a parallel search implementation.
 
 ### 10.4 Request and response shapes
 
@@ -770,7 +799,7 @@ Shapes below are [PROPOSED] refinements of the documented contracts. Keep them c
 { "id": "uuid", "email": "a@b.com", "name": "Ada", "created_at": "2026-11-07T10:00:00Z" }
 ```
 
-**POST `/api/v1/resources`** (headers: `Idempotency-Key`)
+**POST `/api/v1/resources`** (the `Idempotency-Key` header is added in Phase 3)
 ```json
 // request
 {
@@ -800,7 +829,7 @@ Shapes below are [PROPOSED] refinements of the documented contracts. Keep them c
 }
 ```
 
-**GET `/api/v1/resources`** query: `q`, `platform`, `source_type`, `resource_type`, `tag`, `processing_status`, `creator`, `date_from`, `date_to`, `sort` (`date_added`, `-date_added`, `title`, `-title`), `page`, `limit`.
+**GET `/api/v1/resources`** query: `platform`, `source_type`, `resource_type`, `tag`, `processing_status`, `creator`, `sort` (`date_added`, `-date_added`, `title`, `-title`), `page`, `limit`. Invalid `page`/`limit` return 400; a page past the end returns 404. Free-text `q` and date filters belong to `/resources/search` (Phase 4).
 ```json
 {
   "count": 134,
@@ -855,13 +884,13 @@ Shapes below are [PROPOSED] refinements of the documented contracts. Keep them c
 ```
 Validate type allow-list and max size **before** issuing the URL; reject with `UNSUPPORTED_FILE_TYPE` / `FILE_TOO_LARGE`.
 
-**POST `/api/v1/resources/{id}/process`** (header: `Idempotency-Key`; body `{ "force": false }` optional)
+**POST `/api/v1/resources/{id}/process`** [Phase 3] (header: `Idempotency-Key`; body `{ "force": false }` optional)
 ```json
 // 202
 { "job_id": "uuid", "resource_id": "uuid", "processing_status": "PROCESSING" }
 ```
 
-**GET `/api/v1/resources/{id}/status`**
+**GET `/api/v1/resources/{id}/processing`** [Phase 3]
 ```json
 {
   "resource_id": "uuid",
@@ -873,7 +902,7 @@ Validate type allow-list and max size **before** issuing the URL; reject with `U
 }
 ```
 
-**GET `/api/v1/search`** query: `q` (required, length-capped), `mode` (`KEYWORD`, `SEMANTIC`, `HYBRID`; default `KEYWORD` until embeddings are populated), filters as in the list endpoint, `page`, `limit`.
+**GET `/api/v1/resources/search`** [Phase 4] query: `q` (required, length-capped), `mode` (`KEYWORD`, `SEMANTIC`, `HYBRID`; default `KEYWORD` until embeddings are populated), filters as in the list endpoint, `page`, `limit`.
 ```json
 {
   "count": 3, "page": 1, "limit": 20,
@@ -887,7 +916,7 @@ Validate type allow-list and max size **before** issuing the URL; reject with `U
 ```
 Returns a recoverable `STORAGE_ERROR` if the S3 object is missing.
 
-**POST `/api/v1/resources/{id}/tags`** body `{ "name": "Python" }` → 201 with tag; **GET `/api/v1/tags`** → `{ "results": [{ "id": "...", "name": "Python" }] }`.
+Tags are sent as `"tags": ["Python", "Resume"]` on create and PATCH (a PATCH list replaces the existing tags). Names are case-insensitive and de-duplicated.
 
 ---
 
@@ -903,6 +932,11 @@ Returns a recoverable `STORAGE_ERROR` if the S3 object is missing.
 - Allowed formats for MVP: PDF, DOC, DOCX, TXT; others only when explicitly added. [PROPOSED; SOW says "or other supported document formats"]
 - External URLs are stored as references only; the app does not fetch or copy arbitrary external content into S3 in MVP.
 - CORS on the bucket: explicit allow-list of the web origin; no wildcard.
+- The presigned PUT signs `Content-Type` and `Content-Length`: S3 rejects an upload whose type or size differs from what the API approved. The browser must send exactly the `headers` returned by `upload-url`.
+- `AWS_REGION` must equal the bucket's region, otherwise presigned URLs fail with redirects or signature errors.
+- IAM (least privilege): `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on `bucket/<prefix>/*` and `s3:ListBucket` on the bucket. Without `ListBucket`, a missing object returns 403 instead of 404 and surfaces as `STORAGE_ERROR`.
+- Use separate buckets (or at minimum prefixes) and separate credentials for dev, staging and production. On AWS use an IAM role, not access keys. Never commit keys.
+- Step-by-step setup is in `Docs/PHASE_2_FINISH_GUIDE.md`.
 
 ---
 
@@ -1005,12 +1039,12 @@ Environments: local, test, staging, production. Separate databases and S3 bucket
 | Application | `APP_ENV`, `DEBUG`, `ALLOWED_HOSTS`, `SECRET_KEY` | `DEBUG=false` outside local |
 | Database | `DATABASE_URL` | TLS in production |
 | Auth | Django session and CSRF cookie settings | Session authentication with CSRF protection |
-| S3 | `AWS_S3_BUCKET_NAME`, `AWS_REGION`, `AWS_S3_KEY_PREFIX`, `S3_PRESIGN_UPLOAD_TTL_SECONDS`, `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | Private bucket, signed access only |
+| S3 | `AWS_S3_BUCKET_NAME`, `AWS_REGION`, `AWS_S3_KEY_PREFIX`, `AWS_S3_ENDPOINT_URL` (optional), `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (local dev only), `S3_PRESIGN_UPLOAD_TTL_SECONDS`, `S3_PRESIGN_DOWNLOAD_TTL_SECONDS` | Private bucket, signed access only; bucket required when deployed |
 | Queue | `REDIS_URL`, `CELERY_WORKER_CONCURRENCY` | IDs only in payloads |
 | AI | `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Secrets never committed |
 | STT | `GNANI_STT_ENDPOINT`, `GNANI_STT_API_KEY` | Timeout + retry + error mapping |
-| Security | `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, rate-limit settings | Explicit allow-list; no wildcard CORS in production |
-| Uploads | `MAX_UPLOAD_SIZE_BYTES`, `ALLOWED_UPLOAD_MIME_TYPES` | Validated before URL issuance |
+| Security | `CORS_ALLOWED_ORIGINS`, `CSRF_TRUSTED_ORIGINS`, `AUTH_THROTTLE_RATE` (10/min), `UPLOAD_THROTTLE_RATE` (30/min) | Explicit allow-list; no wildcard CORS in production |
+| Uploads | `MAX_UPLOAD_SIZE_BYTES` (10 MiB default); allowed types are the `ALLOWED_UPLOAD_TYPES` constant in `storage_service.py` | Validated before URL issuance |
 
 All external calls (S3, LLM, embeddings, STT) need bounded timeouts, a retry policy, error classification, and observability.
 
@@ -1057,6 +1091,45 @@ Required behavioral cases (from the documentation):
 
 Never report tests as passing unless they were actually run.
 
+### 17.1 Local setup and commands
+
+Repository layout (Windows paths shown; commands are PowerShell):
+
+```text
+FindThatShit/
+├── README.md  implementation.md  AGENTS.md  docker-compose.yml  .gitignore
+├── Docs/                 specs, plans, guides
+├── Frontend/             empty until Phase 4
+└── backend/
+    ├── manage.py  requirements.txt  Dockerfile  .env.example  .env (never committed)
+    ├── scripts/smoke_phase2.py
+    ├── config/           settings, urls, celery, middleware, exceptions, pagination, health, views
+    ├── accounts/         User model, session auth
+    └── resources/        models, serializers, views, urls, tasks, services/, providers/, extractors/, tests/
+```
+
+Run the automated tests (no PostgreSQL, Redis or AWS needed; they use SQLite and mocks). Always clear the variables afterwards, otherwise `APP_ENV=test` leaks into the real server:
+
+```powershell
+cd backend
+$env:APP_ENV="test"; $env:SECRET_KEY="x"; $env:DATABASE_URL="sqlite:///test.sqlite3"
+python manage.py test
+python manage.py makemigrations --check --dry-run
+Remove-Item Env:APP_ENV, Env:SECRET_KEY, Env:DATABASE_URL
+Remove-Item test.sqlite3 -ErrorAction SilentlyContinue
+```
+
+Run the real services:
+
+```powershell
+docker compose up -d db redis
+cd backend
+python manage.py migrate
+python manage.py runserver
+celery -A config worker -l info --pool=solo      # second terminal (needed for S3 cleanup)
+python scripts/smoke_phase2.py                   # third terminal; real S3 round trip
+```
+
 ---
 
 ## 18. Maintaining This File
@@ -1068,18 +1141,17 @@ Never report tests as passing unless they were actually run.
 
 ### Known gaps / things the source documents left unspecified
 
-1. Resource upload/search route alignment between the earlier technical document and this README.
-2. Embedding model and vector dimension (D16).
-3. Hybrid ranking/merge strategy and keyword index (Section 12).
-4. Whether `create` auto-enqueues processing or the client always calls `/process` (Section 5.4).
-5. Exact allowed upload formats and max size.
-6. Source of `title` when the user supplies none (assumed AI-generated).
-7. How `creator` extraction works when the user omits it (best-effort only).
-8. Global (`user_id` NULL) tag lifecycle: who creates them and how they are seeded.
-9. Idempotency record retention period.
+1. Embedding model and vector dimension (D16).
+2. Hybrid ranking/merge strategy and keyword index (Section 12).
+3. Whether `create` auto-enqueues processing or the client always calls `/process` (Section 5.4).
+4. Source of `title` when the user supplies none (assumed AI-generated).
+5. How `creator` extraction works when the user omits it (best-effort only).
+6. Idempotency record retention period.
+7. LLM provider for Phase 3.
 
 ### Change log
 
 | Version | Date | Summary |
 |---|---|---|
 | 0.1 | 2026-11-07 | Initial README consolidated from Product Brief & SOW and MVP Senior Technical Documentation v1.0. |
+| 0.2 | 2026-11-08 | Phase 1 and 2 decisions recorded: session auth (D15), S3 uploads (D17), search/processing routes (D18, D19), idempotency in Phase 3 (D20), tags private per user, `resource_tags` own id + unique constraint, planned endpoints restored, error codes and setup commands added. |

@@ -33,3 +33,8 @@ class HealthTests(TestCase):
         generated = self.client.get("/api/v1/health/")
         self.assertEqual(echoed["X-Request-ID"], "request-123")
         self.assertTrue(generated["X-Request-ID"])
+
+    def test_unknown_api_route_uses_json_error_envelope(self):
+        response = self.client.get("/api/v1/does-not-exist")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "NOT_FOUND")

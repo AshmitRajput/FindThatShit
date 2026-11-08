@@ -3,6 +3,8 @@ from django.urls import include, path, re_path
 
 from config.health import HealthView
 
+handler404 = "config.views.api_not_found"
+
 urlpatterns = [
     path("admin/", admin.site.urls),
     re_path(r"^api/v1/health/?$", HealthView.as_view(), name="health"),
