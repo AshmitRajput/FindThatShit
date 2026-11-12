@@ -62,7 +62,7 @@ This README is the **primary context file for AI coding agents** (and humans) wo
 | D13 | Deployment: Docker + AWS; Nginx reverse proxy; Gunicorn for Django; Route 53 for DNS. | DECIDED |
 | D14 | All enum values are `UPPER_SNAKE_CASE` in DB and API. | PROPOSED |
 | D15 | Auth transport: Django session cookie with DRF `SessionAuthentication`; unsafe browser requests use the CSRF cookie value in `X-CSRFToken`. | DECIDED |
-| D16 | Embedding vector dimension depends on chosen embedding model; set via `EMBEDDING_DIMENSIONS` config and fixed in the migration. | OPEN |
+| D16 | Embeddings use a multilingual model configured by `EMBEDDING_MODEL`; dimension is `768`, set via `EMBEDDING_DIMENSIONS` and fixed in migration. | DECIDED |
 | D17 | Phase 2 uploads use one private S3 file per resource, with MIME-derived keys and presigned PUT/GET URLs. | DECIDED |
 | D18 | Search route is `GET /api/v1/resources/search` (Phase 4). Resource routes use `<uuid:pk>`, so `search` is never read as an id. | DECIDED |
 | D19 | Processing routes are `POST /api/v1/resources/{id}/process` and `GET /api/v1/resources/{id}/processing` (Phase 3). | DECIDED |
@@ -126,7 +126,7 @@ All future ingestion paths must **normalize into the same** `Resource / SourceCo
 |---|---|---|
 | 1 | Foundation + accounts: Django/DRF, PostgreSQL, Redis, Celery, health, session auth, error envelope | Done |
 | 2 | Resource core + storage: models, CRUD, tags, pagination, S3 presigned upload/download | Code done; live S3 check and full test suite pending sign-off |
-| 3 | Async processing + AI: `ProcessingJob`, extractors (PDF/DOCX/TXT), AI provider, idempotency, `/process`, `/processing` | Planned |
+| 3 | Async processing + AI: `ProcessingJob`, extractors (PDF/DOCX/TXT), AI provider, idempotency, `/process`, `/processing` | Done |
 | 4 | Search + frontend: `GET /resources/search`, React screens | Planned |
 | 5 | Integration, hardening, security/processing/upload/search test passes | Planned |
 
@@ -1147,7 +1147,7 @@ python scripts/smoke_phase2.py                   # third terminal; real S3 round
 4. Source of `title` when the user supplies none (assumed AI-generated).
 5. How `creator` extraction works when the user omits it (best-effort only).
 6. Idempotency record retention period.
-7. LLM provider for Phase 3.
+7. LLM provider for Phase 3 is selected through the environment-configured adapter; the wire format is OpenAI-compatible pending Gnani-specific documentation.
 
 ### Change log
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
+from corsheaders.defaults import default_headers
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
@@ -34,6 +35,19 @@ S3_PRESIGN_DOWNLOAD_TTL_SECONDS = int(os.getenv("S3_PRESIGN_DOWNLOAD_TTL_SECONDS
 MAX_UPLOAD_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_SIZE_BYTES", str(10 * 1024 * 1024)))
 if IS_DEPLOYED and not AWS_S3_BUCKET_NAME:
     raise ImproperlyConfigured("AWS_S3_BUCKET_NAME is required in deployed environments.")
+LLM_API_URL = os.getenv("LLM_API_URL", "")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
+EMBEDDING_API_URL = os.getenv("EMBEDDING_API_URL", "")
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "768"))
+AI_TIMEOUT_SECONDS = int(os.getenv("AI_TIMEOUT_SECONDS", "60"))
+LLM_INPUT_MAX_CHARS = int(os.getenv("LLM_INPUT_MAX_CHARS", "12000"))
+EMBEDDING_INPUT_MAX_CHARS = int(os.getenv("EMBEDDING_INPUT_MAX_CHARS", "8000"))
+PROCESSING_STALE_AFTER_SECONDS = int(os.getenv("PROCESSING_STALE_AFTER_SECONDS", "900"))
+if IS_DEPLOYED and not (LLM_API_KEY and EMBEDDING_API_KEY):
+    raise ImproperlyConfigured("LLM_API_KEY and EMBEDDING_API_KEY are required in deployed environments.")
 
 DEBUG = env_bool("DEBUG", False)
 if IS_DEPLOYED and DEBUG:
@@ -137,6 +151,7 @@ CSRF_COOKIE_SAMESITE = "Lax"
 CSRF_COOKIE_SECURE = IS_DEPLOYED
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
+CORS_ALLOW_HEADERS = (*default_headers, "idempotency-key")
 CORS_ALLOW_CREDENTIALS = True
 if IS_DEPLOYED:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -152,6 +167,7 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "auth": os.getenv("AUTH_THROTTLE_RATE", "10/min"),
         "upload": os.getenv("UPLOAD_THROTTLE_RATE", "30/min"),
+        "process": os.getenv("PROCESS_THROTTLE_RATE", "20/min"),
     },
 }
 

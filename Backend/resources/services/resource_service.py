@@ -61,6 +61,11 @@ def set_tags(resource, user, names):
     resource.tags.set(tags)
 
 
+def add_tags(resource, user, names):
+    existing = [tag.name for tag in resource.tags.all()]
+    set_tags(resource, user, existing + list(names))
+
+
 def create_resource(user, data):
     resource_url = data.get("resource_url", "")
     with transaction.atomic():

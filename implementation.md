@@ -82,4 +82,50 @@ Upload documents directly to private S3 and download them securely.
 - User-scoped CRUD, tag normalization/replacement, pagination, filtering, sorting, optimistic locking, and JSON 404 responses are implemented.
 - Upload URLs validate PDF/DOCX/TXT and size limits, sanitize filenames, use MIME-derived S3 keys, replace the single file row, and schedule old-object cleanup.
 - Download URLs distinguish missing file metadata, not-yet-uploaded objects, and storage failures.
-- No Phase 3 processing, AI, search, idempotency, or extra Django apps were added.
+- Search, voice, and extra Django apps remain out of scope for Phase 2.
+
+---
+
+## Feature: Async processing (Phase 3)
+
+### Purpose
+Process uploaded documents and supplied source text asynchronously, persist validated AI metadata, and store embeddings.
+
+### Logic
+- `POST /api/v1/resources/{id}/process` creates or reuses one active `ProcessingJob`, marks the resource `PROCESSING`, and enqueues Celery after commit.
+- Workers claim pending or stale jobs with row locking, extract PDF/DOCX/TXT content, call the provider adapter, save AI metadata before embedding, and finish as `PROCESSED` or `FAILED`.
+- Retryable provider and storage failures use Celery retries; provider responses and document contents are never logged or returned.
+- `GET /api/v1/resources/{id}/processing` returns the latest job state. Ownership remains enforced through the resource queryset.
+
+### Files Changed
+- `backend/resources/models.py`, migration `0002_*`, serializers, views, admin, tasks.
+- `backend/resources/providers/ai.py`, `providers/storage.py`, `extractors/documents.py`.
+- `backend/resources/services/analysis_schema.py`, `content_service.py`, `processing_service.py`.
+
+### API / Data Changes
+- Added `ProcessingJob`, `Embedding`, `resources.summary`, and `resources.content_language`.
+- Added processing stages/statuses and errors `ALREADY_PROCESSED` and `NOTHING_TO_PROCESS`.
+- Embeddings use configured `EMBEDDING_DIMENSIONS` (768 default) with a SQLite-compatible test field.
+
+### Important Notes
+- Phase 3 does not fetch external URLs or call STT/TTS; URL/post/transcript metadata is processed as supplied.
+- The embedding model and provider URLs are configured through environment variables.
+
+## Feature: Idempotency (Phase 3)
+
+### Purpose
+Make resource creation and processing requests safe to replay.
+
+### Logic
+- Optional `Idempotency-Key` values are limited to 64 characters and are scoped by user and endpoint.
+- A matching key and payload replays the original identifiers; a different payload returns `IDEMPOTENCY_CONFLICT`.
+
+### Files Changed
+- `backend/resources/models.py`, `migrations/0002_*`, `services/idempotency_service.py`, and `views.py`.
+
+### API / Data Changes
+- Added the `idempotency_keys` table and `Idempotency-Key` CORS header.
+- `POST /api/v1/resources` and `/process` now support idempotent replay.
+
+### Important Notes
+- The idempotency record and database work are transactional; external S3 and AI calls remain outside transactions.

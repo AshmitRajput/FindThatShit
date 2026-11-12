@@ -70,6 +70,10 @@ class UploadUrlRequestSerializer(serializers.Serializer):
     size = serializers.IntegerField(min_value=1)
 
 
+class ProcessRequestSerializer(serializers.Serializer):
+    force = serializers.BooleanField(required=False, default=False)
+
+
 class ResourceListQuerySerializer(serializers.Serializer):
     platform = serializers.ChoiceField(choices=Platform.choices, required=False)
     source_type = serializers.ChoiceField(choices=SourceType.choices, required=False)
@@ -160,6 +164,8 @@ class ResourceDetailSerializer(serializers.Serializer):
                     for tag in sorted(resource.tags.all(), key=lambda tag: tag.normalized_name)
                 ],
                 "keywords": resource.keywords,
+                "summary": resource.summary,
+                "language": resource.content_language,
             },
             "system": {
                 "date_added": date_field.to_representation(resource.created_at),

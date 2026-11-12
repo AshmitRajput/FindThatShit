@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from resources.models import File, Resource, SourceContent, Tag
+from resources.models import Embedding, File, ProcessingJob, Resource, SourceContent, Tag
 
 
 @admin.register(Resource)
@@ -14,3 +14,12 @@ class ResourceAdmin(admin.ModelAdmin):
 admin.site.register(SourceContent)
 admin.site.register(File)
 admin.site.register(Tag)
+
+
+@admin.register(ProcessingJob)
+class ProcessingJobAdmin(admin.ModelAdmin):
+    list_display = ("id", "resource", "status", "stage", "attempt", "error_code", "created_at")
+    list_filter = ("status", "stage")
+
+
+admin.site.register(Embedding)

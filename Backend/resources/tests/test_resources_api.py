@@ -153,7 +153,10 @@ class DetailAndUpdateTests(ApiTestCase):
         self.assertEqual(set(detail), {"id", "source", "resource", "ai_metadata", "system"})
         self.assertEqual(detail["resource"]["title"], "T")
         self.assertIsNone(detail["resource"]["file"])
-        self.assertEqual(detail["ai_metadata"], {"tags": ["x"], "keywords": []})
+        self.assertEqual(
+            detail["ai_metadata"],
+            {"tags": ["x"], "keywords": [], "summary": "", "language": ""},
+        )
         self.assertEqual(detail["system"]["version"], 1)
         self.assertEqual(detail["system"]["processing_status"], "UPLOADED")
 

@@ -12,6 +12,10 @@ class StorageProviderError(Exception):
     pass
 
 
+class StorageObjectTooLargeError(StorageProviderError):
+    pass
+
+
 @lru_cache(maxsize=1)
 def _client():
     endpoint_url = settings.AWS_S3_ENDPOINT_URL or (
@@ -69,6 +73,19 @@ def object_exists(key):
         raise StorageProviderError("Could not check object.") from exc
     except BotoCoreError as exc:
         raise StorageProviderError("Could not check object.") from exc
+
+
+def get_object_bytes(key, max_bytes):
+    try:
+        response = _client().get_object(Bucket=_bucket(), Key=key)
+        if response["ContentLength"] > max_bytes:
+            raise StorageObjectTooLargeError("Object is too large.")
+        data = response["Body"].read(max_bytes + 1)
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageProviderError("Could not read object.") from exc
+    if len(data) > max_bytes:
+        raise StorageObjectTooLargeError("Object is too large.")
+    return data
 
 
 def delete_object(key):

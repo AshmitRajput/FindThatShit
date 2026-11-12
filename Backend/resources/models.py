@@ -3,6 +3,7 @@ import uuid
 from django.conf import settings
 from django.db import models
 from django.db.models import Q
+from pgvector.django import VectorField
 
 
 class Platform(models.TextChoices):
@@ -37,6 +38,21 @@ class ProcessingStatus(models.TextChoices):
     FAILED = "FAILED"
 
 
+class JobStatus(models.TextChoices):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+class JobStage(models.TextChoices):
+    EXTRACT_SOURCE = "EXTRACT_SOURCE"
+    TRANSCRIBE = "TRANSCRIBE"
+    EXTRACT_DOCUMENT = "EXTRACT_DOCUMENT"
+    ANALYZE = "ANALYZE"
+    EMBED = "EMBED"
+
+
 PLATFORM_BY_SOURCE_TYPE = {
     SourceType.INSTAGRAM_REEL: Platform.INSTAGRAM,
     SourceType.INSTAGRAM_POST: Platform.INSTAGRAM,
@@ -60,6 +76,8 @@ class Resource(models.Model):
     resource_url = models.URLField(max_length=2048, blank=True, default="")
     resource_type = models.CharField(max_length=30, choices=ResourceType.choices, default=ResourceType.OTHER)
     description = models.TextField(blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    content_language = models.CharField(max_length=10, blank=True, default="")
     keywords = models.JSONField(default=list, blank=True)  # list[str]; filled by AI processing (Phase 3)
     processing_status = models.CharField(
         max_length=20, choices=ProcessingStatus.choices, default=ProcessingStatus.UPLOADED
@@ -151,4 +169,76 @@ class ResourceTag(models.Model):
         db_table = "resource_tags"
         constraints = [
             models.UniqueConstraint(fields=["resource", "tag"], name="resource_tags_resource_id_tag_id_uq"),
+        ]
+
+
+class EmbeddingVectorField(VectorField):
+    def db_type(self, connection):
+        if connection.vendor != "postgresql":
+            return "text"
+        return super().db_type(connection)
+
+
+class ProcessingJob(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    resource = models.ForeignKey(Resource, on_delete=models.CASCADE, related_name="processing_jobs")
+    stage = models.CharField(max_length=30, choices=JobStage.choices, default=JobStage.EXTRACT_SOURCE)
+    status = models.CharField(max_length=20, choices=JobStatus.choices, default=JobStatus.PENDING)
+    attempt = models.PositiveIntegerField(default=0)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    error_message = models.TextField(blank=True, default="")
+    is_retryable = models.BooleanField(default=False)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "processing_jobs"
+        indexes = [models.Index(fields=["status", "created_at"], name="processing_jobs_status_idx")]
+        constraints = [
+            models.CheckConstraint(condition=Q(status__in=JobStatus.values), name="processing_jobs_status_ck"),
+            models.CheckConstraint(condition=Q(stage__in=JobStage.values), name="processing_jobs_stage_ck"),
+            models.UniqueConstraint(
+                fields=["resource"],
+                condition=Q(status__in=[JobStatus.PENDING, JobStatus.RUNNING]),
+                name="processing_jobs_resource_active_uq",
+            ),
+        ]
+
+
+class Embedding(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    resource = models.ForeignKey(Resource, on_delete=models.CASCADE, related_name="embeddings")
+    vector = EmbeddingVectorField(dimensions=settings.EMBEDDING_DIMENSIONS)
+    model = models.CharField(max_length=100)
+    content_hash = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "embeddings"
+        constraints = [
+            models.UniqueConstraint(fields=["resource", "model"], name="embeddings_resource_id_model_uq"),
+        ]
+
+
+class IdempotencyKey(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="idempotency_keys")
+    key = models.CharField(max_length=128)
+    endpoint = models.CharField(max_length=100)
+    request_hash = models.CharField(max_length=64)
+    resource_id = models.UUIDField(null=True, blank=True)
+    job_id = models.UUIDField(null=True, blank=True)
+    response_status = models.PositiveSmallIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "idempotency_keys"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "key", "endpoint"],
+                name="idempotency_keys_user_id_key_endpoint_uq",
+            ),
         ]

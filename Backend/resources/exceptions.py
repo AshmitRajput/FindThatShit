@@ -41,3 +41,24 @@ class StorageUnavailableError(APIError):
     default_detail = "File storage is temporarily unavailable. Try again later."
     default_code = "storage_error"
     error_code = "STORAGE_ERROR"
+
+
+class IdempotencyConflictError(APIError):
+    status_code = 409
+    default_detail = "This Idempotency-Key was already used with a different request."
+    default_code = "idempotency_conflict"
+    error_code = "IDEMPOTENCY_CONFLICT"
+
+
+class AlreadyProcessedError(APIError):
+    status_code = 409
+    default_detail = "This resource is already processed. Send force=true to process it again."
+    default_code = "already_processed"
+    error_code = "ALREADY_PROCESSED"
+
+
+class NothingToProcessError(APIError):
+    status_code = 400
+    default_detail = "Add a file, resource URL, post text or transcript before processing."
+    default_code = "nothing_to_process"
+    error_code = "NOTHING_TO_PROCESS"
