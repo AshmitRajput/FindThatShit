@@ -129,3 +129,55 @@ Make resource creation and processing requests safe to replay.
 
 ### Important Notes
 - The idempotency record and database work are transactional; external S3 and AI calls remain outside transactions.
+
+
+
+## Feature: Async processing (Phase 3)
+ 
+### Purpose
+Turn a saved resource into searchable knowledge: extract text, ask the LLM for structured metadata, store description, summary, keywords, tags and language, create an embedding, and report progress.
+ 
+### Logic
+- `POST /resources/{id}/process` checks the file exists in S3 (outside any transaction), then in one transaction creates a `ProcessingJob` (PENDING) and sets the resource to `PROCESSING`; the Celery task is queued after commit. A second request while a job is active returns the same job (DB partial unique constraint `processing_jobs_resource_active_uq`). A `PROCESSED` resource needs `force: true`.
+- `process_resource` (Celery, max 3 retries, backoff 30/60/120 s) calls `processing_service.run_job`. The job is claimed with `SELECT ... FOR UPDATE SKIP LOCKED`; a `RUNNING` job older than `PROCESSING_STALE_AFTER_SECONDS` can be claimed again.
+- Pipeline: load content (S3 download, size check, SHA-256 stored in `files.checksum`, PDF/DOCX/TXT text extraction) -> LLM analysis (JSON validated by `analysis_schema`) -> commit 1: description, summary, keywords, language, tags (added, never removed), title only if blank, resource type only if `OTHER`, `version + 1` -> embedding -> commit 2: embedding row, job `SUCCEEDED`, resource `PROCESSED`.
+- Retryable errors (timeouts, 429/5xx, invalid LLM output, storage hiccups) return the job to `PENDING` until the last attempt, then `FAILED`. Non-retryable errors fail at once. If only the embedding fails, AI metadata is kept and the job fails with `EMBEDDING_FAILED`.
+- Document text is sent to the AI provider (capped by `LLM_INPUT_MAX_CHARS`) and is not stored.
+### Files Changed
+- `backend/resources/`: `models.py`, `migrations/0002_*`, `tasks.py`, `serializers.py`, `views.py`, `admin.py`, `exceptions.py`, `providers/ai.py`, `providers/storage.py`, `extractors/documents.py`, `services/processing_service.py`, `services/analysis_schema.py`, `services/content_service.py`, `services/resource_service.py` (`add_tags`), `tests/`.
+- `backend/config/settings.py`, `backend/requirements.txt`, `backend/.env.example`, `backend/scripts/smoke_phase3.py`.
+### API / Data Changes
+- Endpoints: `POST /api/v1/resources/{id}/process` (202, throttle scope `process`), `GET /api/v1/resources/{id}/processing`. Detail `ai_metadata` now has `tags, keywords, summary, language`.
+- Tables: `processing_jobs`, `embeddings` (pgvector, dimension `EMBEDDING_DIMENSIONS`), `idempotency_keys`; new `resources.summary`, `resources.content_language`. Index `processing_jobs_status_idx`.
+- Error codes: `IDEMPOTENCY_CONFLICT`, `ALREADY_PROCESSED`, `NOTHING_TO_PROCESS`. Job error codes are stored on the job only.
+- Settings: `LLM_*`, `EMBEDDING_*`, `AI_TIMEOUT_SECONDS`, `LLM_INPUT_MAX_CHARS`, `EMBEDDING_INPUT_MAX_CHARS`, `PROCESSING_STALE_AFTER_SECONDS`, `PROCESS_THROTTLE_RATE`.
+### Important Notes
+- Status changes do not bump `version`; only the AI content save does.
+- The embedding dimension is fixed in the migration; changing the model size needs a new migration and re-embedding.
+- The AI adapter wire format is OpenAI-style; replace it in `providers/ai.py` only when the real provider contract is known.
+- A retry re-runs the whole pipeline (LLM call and a second `version` bump). Acceptable for the MVP.
+- Speech-to-text is not wired; the `TRANSCRIBE` stage value is reserved.
+---
+ 
+## Feature: Idempotency (Phase 3)
+ 
+### Purpose
+Make duplicate `POST /resources` and `POST /resources/{id}/process` requests safe.
+ 
+### Logic
+- Optional `Idempotency-Key` header (max 64 chars). `idempotency_service.run` reserves the key, does the work and records the result in one transaction. A duplicate waits on the unique index, then replays the stored result; the same key with a different payload returns 409 `IDEMPOTENCY_CONFLICT`. A failed request rolls the key back.
+- Replaying after the resource was deleted returns 404.
+### Files Changed
+- `backend/resources/services/idempotency_service.py`, `views.py`, `models.py` (`IdempotencyKey`), `config/settings.py` (`CORS_ALLOW_HEADERS`).
+### Important Notes
+- No cleanup job for old keys yet.
+---
+ 
+# README.md edits
+ 
+- Section 2: D16 -> **DECIDED**, record the embedding model and dimension.
+- Section 3.5: Phase 3 -> Done.
+- Known gaps: gap 3 decided (client always calls `/process`); gap 7 decided (record the LLM provider).
+- Section 8: add `resources.summary`, `resources.content_language`; index name `processing_jobs_status_idx`; job `error_code` is `""` in the DB and `null` in the API.
+- Section 6.3: resource status becomes `PROCESSING` when the job is created.
+- Change log: add "0.3 - Phase 3: processing, embeddings, idempotency".

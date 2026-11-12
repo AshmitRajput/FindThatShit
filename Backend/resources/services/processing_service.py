@@ -198,7 +198,7 @@ def _analyze(job, content):
 def _save_analysis(job, analysis):
     now = timezone.now()
     with transaction.atomic():
-        resource = Resource.objects.select_for_update().select_related("user").get(pk=job.resource_id)
+        resource = Resource.objects.select_for_update().get(pk=job.resource_id)
         fields = {
             "description": analysis["resource_description"],
             "summary": analysis["summary"],
